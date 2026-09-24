@@ -1,0 +1,6 @@
+torch>=2.1
+numpy>=1.24
+scipy>=1.11      # milp (HiGHS)
+matplotlib>=3.7
+pytest
+# optional: cvxpy cvxpylayers   (QPProjectRound(use_cvxpy=True))
