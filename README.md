@@ -1,4 +1,4 @@
-# STSG-MCS: thực nghiệm cho paper AAMAS 2027
+# STSG-MCS: thực nghiệm cho paper Feasible-by-Construction Combinatorial Actions in Hierarchical Multi-Agent Reinforcement Learning
 
 Straight-through soft-greedy layer trên partition matroid ∩ knapsack, gắn vào
 C-BMDP đồng quy hoạch hành lang MCS-BSS. Code bám theo bản LaTeX; bảng ánh xạ
