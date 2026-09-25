@@ -10,6 +10,8 @@ C-BMDP đồng quy hoạch hành lang MCS-BSS. Code bám theo bản LaTeX; bản
     export PYTHONPATH=$(pwd)
     python -m pytest -q tests/          # 7 test, gồm Prop. feasible và Thm consistency
     W=8 bash run_all.sh                 # toàn bộ, kết quả trong results/, bảng trong results/tables.tex
+    chmod +x run_all.sh                 # Git bash
+    /run_all.sh                         # Git bash   
 
 ## Cấu trúc
 
@@ -34,18 +36,6 @@ C-BMDP đồng quy hoạch hành lang MCS-BSS. Code bám theo bản LaTeX; bản
 | exp3_bilevel | bảng chính: vi phạm, coverage gap, return, CVaR, thời gian; `--ablations`, `--no_cvar` | Table tab:main |
 | exp4_amortisation | amortised vs retrain theo từng X: outcome và giá trị biên của module | Amortisation |
 | exp5_colocation | sai phân bậc hai MCS+BSS, MCS+BESS | Supermodular co-location |
-
-## Những điểm paper phải khớp với code
-
-1. Gate matroid dùng σ((n − 1/2)/τ₂). Bản paper σ((n − 1)/τ₂) cho δ = 0 khi part còn 1 slot, Thm consistency không áp dụng được. Tái hiện bằng `abl_paper_gate_offset` / cột offset 1 của exp1.
-2. Mặc định c^(k) = c_π(k) như paper, nên m không phụ thuộc ŷ. `stsg_softcost` dùng c̃ = P^s c.
-3. Coverage gap chỉ đo thành phần phủ; MILP không mô hình follower game.
-4. NashConv là cận dưới (chỉ lệch giá hằng).
-5. Exp4 đo amortisation bias của outcome và giá trị biên, không phải hypergradient.
-6. Demand hoàn toàn tổng hợp, không có OD matrix công bố.
-7. Leader thấy follower qua K = 8 phân vị lognormal cố định của demand (common random numbers), kết quả follower được cache theo (X, k).
-8. Hằng số Wang 2011 trong `env/instance.py` phải đối chiếu với bài gốc (đánh dấu VERIFY).
-9. Đơn giản hóa: một điểm dừng mỗi chuyến, không V2G, không PV, overflow tại trạm tính là unserved. Frank-Wolfe dừng ở 80 vòng, relative gap vài phần trăm với BPR bậc 4.
 
 ## Tham số chính
 
