@@ -64,6 +64,10 @@ def main():
     ap.add_argument("--beta_delay", type=float, default=LeaderConfig.beta_delay)
     ap.add_argument("--beta_cvar", type=float, default=LeaderConfig.beta_cvar)
     ap.add_argument("--delay_metric", default="per_served", choices=["per_served", "total"])
+    ap.add_argument("--explore_sigma", type=float, default=LeaderConfig.explore_sigma)
+    ap.add_argument("--explore_decay", type=float, default=LeaderConfig.explore_decay)
+    ap.add_argument("--prior_scale", type=float, default=LeaderConfig.prior_scale,
+                    help="warm start: actor = residual on the static coverage key (0 = off)")
     ap.add_argument("--probe", action="store_true",
                     help="train/load follower, calibrate, print the heuristic constraint landscape, exit")
     ap.add_argument("--out", default="results")
@@ -81,9 +85,13 @@ def main():
     old = json.load(open(out_path)) if os.path.exists(out_path) else None
 
     betas = dict(beta_grid=a.beta_grid, beta_delay=a.beta_delay, beta_cvar=a.beta_cvar)
+    train_kw = dict(explore_sigma=a.explore_sigma, explore_decay=a.explore_decay, prior_scale=a.prior_scale)
     env0 = LeaderEnv(inst, follower, seed=0, delay_metric=a.delay_metric)
     ref = calibrate(env0)
     if old is not None and not a.probe:
+        old_train = old.get("train_kw", dict(explore_sigma=0.3, explore_decay=0.99, prior_scale=0.0))
+        if old_train != train_kw:
+            raise SystemExit(f"stored runs used {old_train}; got {train_kw}. Use a new --out.")
         if old.get("betas") not in (None, betas) or old.get("delay_metric", a.delay_metric) != a.delay_metric:
             raise SystemExit(f"stored runs used betas={old.get('betas')} delay_metric={old.get('delay_metric')}; "
                              f"got {betas} {a.delay_metric}. Use a new --out.")
@@ -133,7 +141,7 @@ def main():
 
     results = {"tag": tag, "ref": ref, "milp_cov_disc": milp_val, "follower_time": f_time,
                "follower_log": flog if flog is not None else (old or {}).get("follower_log"),
-               "nashconv": nc, "references": refs, "phi_sweep": sweep, "betas": betas,
+               "nashconv": nc, "references": refs, "phi_sweep": sweep, "betas": betas, "train_kw": train_kw,
                "delay_metric": a.delay_metric, "runs": list((old or {}).get("runs", []))}
     methods = list(dict.fromkeys(list(a.methods) + (ABL if a.ablations else [])))
     done = {(r["method"], r["seed"]) for r in results["runs"]}
@@ -150,7 +158,8 @@ def main():
     adir = os.path.join(a.out, "actors")
     os.makedirs(adir, exist_ok=True)
     args = [(inst, fpath, meth, sd, a.leader_iters, a.leader_eps, not a.no_cvar, ref, milp_val, a.workers == 1,
-             os.path.join(adir, f"{tag}{'_nocvar' if a.no_cvar else ''}_{meth}_s{sd}.pt"), betas, a.delay_metric)
+             os.path.join(adir, f"{tag}{'_nocvar' if a.no_cvar else ''}_{meth}_s{sd}.pt"), betas, a.delay_metric,
+             train_kw)
             for meth, sd in jobs]
     if a.workers > 1 and len(args) > 1:
         from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -175,11 +184,12 @@ def report(run):
 
 
 def run_one(arg):
-    inst, fpath, meth, sd, iters, eps, use_cvar, ref, milp_val, verbose, actor_path, betas, delay_metric = arg
+    inst, fpath, meth, sd, iters, eps, use_cvar, ref, milp_val, verbose, actor_path, betas, delay_metric, train_kw = arg
     torch.set_num_threads(1)
     follower = FollowerPolicy(); follower.load_state_dict(torch.load(fpath))
     env = LeaderEnv(inst, follower, seed=sd, delay_metric=delay_metric)
-    cfg = LeaderConfig(layer=meth, iters=iters, episodes_per_iter=eps, seed=sd, use_cvar=use_cvar, **betas)
+    cfg = LeaderConfig(layer=meth, iters=iters, episodes_per_iter=eps, seed=sd, use_cvar=use_cvar,
+                       **betas, **train_kw)
     agent = LeaderAgent(env, cfg, ref)
     t1 = time.time()
     log = agent.train(verbose=verbose, log_every=max(1, iters // 5))

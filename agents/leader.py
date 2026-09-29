@@ -38,13 +38,25 @@ def mlp(i, o, h=128, n=2, act=nn.ReLU):
 
 
 class ScoreNet(nn.Module):
-    def __init__(self, h=128):
+    """y_j = g_Phi(feat_j, glob) + prior_scale * cov_j / max_j cov_j.
+
+    prior_scale > 0 makes the actor a residual on top of the static coverage key
+    (the plan of Ref.: Alg. 1, static key), i.e. a warm start. Same network for
+    every action layer, so the comparison between layers stays fair."""
+    COV_IDX = 4 + 2          # N_TYPES one-hot, then cost, position, coverage strength
+
+    def __init__(self, h=128, prior_scale=0.0):
         super().__init__()
         self.f = mlp(FEAT_DIM + GLOB_DIM, 1, h)
+        self.prior_scale = prior_scale
 
     def forward(self, feats, glob):
         g = glob.unsqueeze(1).expand(-1, feats.shape[1], -1)
-        return self.f(torch.cat([feats, g], -1)).squeeze(-1)
+        y = self.f(torch.cat([feats, g], -1)).squeeze(-1)
+        if self.prior_scale:
+            cov = feats[..., self.COV_IDX]
+            y = y + self.prior_scale * cov / cov.amax(-1, keepdim=True).clamp_min(1e-9)
+        return y
 
 
 class Critic(nn.Module):
@@ -73,6 +85,7 @@ class LeaderConfig:
     buffer: int = 4000
     explore_sigma: float = 0.3
     explore_decay: float = 0.99
+    prior_scale: float = 0.0         # warm start from the static coverage key (0 = off, the stored runs)
     alpha_cvar: float = 0.9
     # constraint levels as multiples of the calibration plan (coverage greedy):
     #   expected discounted grid excess  <= 0.8 x reference       (20% reduction, binds for the reference)
@@ -93,7 +106,7 @@ class LeaderAgent:
         self.env, self.cfg, self.ref = env, cfg, ref
         torch.manual_seed(cfg.seed)
         self.rng = np.random.default_rng(cfg.seed)
-        self.actor, self.critic = ScoreNet(), Critic()
+        self.actor, self.critic = ScoreNet(prior_scale=cfg.prior_scale), Critic()
         self.layer = make_layer(cfg.layer, **cfg.layer_kw)
         self.oa = torch.optim.Adam(self.actor.parameters(), lr=cfg.lr_actor)
         self.oc = torch.optim.Adam(self.critic.parameters(), lr=cfg.lr_critic)
