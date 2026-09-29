@@ -66,13 +66,14 @@ def tab_exp3(runs, refs, methods, caption, label, with_refs):
     if not any(m in runs for m in methods):
         return ""
     out = [r"\begin{table*}[t]\centering\small", f"\\caption{{{caption}}}\\label{{{label}}}",
-           r"\begin{tabular}{lccccccc}\toprule",
-           r"Method & $n$ & Viol.\ rate & CMDP-ok & Cov.\ gap$^\ast$ & Return & CVaR$_\alpha$ grid & s/update \\ \midrule"]
+           r"\begin{tabular}{lcccccccc}\toprule",
+           r"Method & $n$ & Viol.\ rate & CMDP-ok & Built & Cov.\ gap$^\ast$ & Return & CVaR$_\alpha$ grid & s/update \\ \midrule"]
     if with_refs:
         for name, ev in refs.items():
             ok = ("yes" if ev["cmdp_ok"] else "no") if "cmdp_ok" in ev else "---"
             phi = f" ({ev.get('family', 'greedy')}, $\\phi={ev['phi']:g}$)" if "phi" in ev else ""
             out.append(f"{NAMES.get(name, name)}{phi} & -- & {fnum(ev['infeas_rate'])} & {ok} & "
+                       f"{int(sum(ev['built_example']))} & "
                        f"{fnum(ev['cov_gap_milp'])} & {fnum(ev['ret'])} & {fnum(ev['cvar_grid'])} & -- \\\\")
         if refs:
             out.append(r"\midrule")
@@ -84,13 +85,14 @@ def tab_exp3(runs, refs, methods, caption, label, with_refs):
         feas = [e["cov_gap_milp"] for e in ev if e["infeas_rate"] == 0]
         gap = ci_cell(feas) + (f" ({len(feas)})" if len(feas) < len(ev) else "")
         out.append(f"{NAMES.get(m, m)} & {len(rr)} & {ci_cell([e['infeas_rate'] for e in ev])} & "
-                   f"{count_ok(ev)} & {gap} & "
+                   f"{count_ok(ev)} & {ci_cell([sum(e['built_example']) for e in ev], 1)} & {gap} & "
                    f"{ci_cell([e['ret'] for e in ev])} & {ci_cell([e['cvar_grid'] for e in ev])} & "
                    f"{ci_cell([r['time_per_update'] for r in rr], 2)} \\\\")
     out += [r"\bottomrule\end{tabular}",
             r"\\[2pt]\footnotesize Cells: mean [95\% bootstrap CI] over training seeds. "
             r"$^\ast$feasible runs only, count in parentheses when some runs are infeasible. "
-            r"$^\dagger$deterministic plan, one value. CMDP-ok: seeds whose deployed policy satisfies every "
+            r"$^\dagger$deterministic plan, one value. Built: modules installed after the last stage (0 = empty plan, "
+            r"which satisfies every constraint trivially). CMDP-ok: seeds whose deployed policy satisfies every "
             r"constraint of the CMDP and is feasible; details in Table~\ref{tab:constraints}.",
             r"\end{table*}", ""]
     return "\n".join(out)

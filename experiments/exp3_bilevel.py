@@ -124,11 +124,11 @@ def main():
     if a.probe:
         print("[probe] g/beta per plan (grid / delay / cvar):")
         for e in sweep:
-            print(f"   {e['family']:12s} phi={e['phi']:.1f} ret {e['ret']:.3f}  "
+            print(f"   {e['family']:12s} phi={e['phi']:.1f} built {e['n_built']:3d} ret {e['ret']:.3f}  "
                   f"{e['g_grid']:.2f} / {e['g_delay']:.2f} / {e['g_cvar']:.2f}  {'OK' if e['cmdp_ok'] else ''}")
         cov = refs["ref_greedy_rerank"]
         print(f"[probe] coverage greedy binds: {not cov['cmdp_ok']}   "
-              f"some heuristic feasible: {any(e['cmdp_ok'] for e in sweep)}")
+              f"some NON-EMPTY heuristic feasible: {any(e['cmdp_ok'] and e['n_built'] > 0 for e in sweep)}")
         return
 
     results = {"tag": tag, "ref": ref, "milp_cov_disc": milp_val, "follower_time": f_time,

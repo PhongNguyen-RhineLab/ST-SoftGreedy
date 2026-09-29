@@ -362,10 +362,12 @@ def constrained_greedy_reference(env, ref, cfg, phis=None):
             ev = evaluate_policy(env, maker(phi), cfg.gamma, cfg.alpha_cvar, ref=ref, cfg=cfg)
             ev["phi"], ev["family"] = phi, fam
             sweep.append(ev)
-    ok = [e for e in sweep if e["cmdp_ok"]]
-    best = max(ok, key=lambda e: e["ret"]) if ok else min(sweep, key=lambda e: e["cmdp_max_ratio"])
+    # the empty plan (phi = 0) satisfies every constraint trivially and must not count as a reference
+    nonempty = [e for e in sweep if sum(e["built_example"]) > 0]
+    ok = [e for e in nonempty if e["cmdp_ok"]]
+    best = max(ok, key=lambda e: e["ret"]) if ok else min(nonempty, key=lambda e: e["cmdp_max_ratio"])
     keys = ("family", "phi", "ret", "g_grid", "g_delay", "g_cvar", "cmdp_ok")
-    return best, [{k: e[k] for k in keys} for e in sweep]
+    return best, [{**{k: e[k] for k in keys}, "n_built": int(sum(e["built_example"]))} for e in sweep]
 
 
 def calibrate(env: LeaderEnv, gamma=0.95):
