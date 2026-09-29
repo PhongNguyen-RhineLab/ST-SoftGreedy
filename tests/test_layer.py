@@ -60,10 +60,13 @@ def test_rank_lemma_and_consistency():
 
 
 def test_naive_softsort_is_identity_limit():
+    torch.manual_seed(0)
     s = torch.randn(4, 12)
-    P, _ = naive_softsort(s, 1e-4)
+    gap = torch.sort(s, -1).values.diff(dim=-1).min().item()
+    tau = gap / 50                                    # limit statement needs tau << min gap
+    P, _ = naive_softsort(s, tau)
     assert torch.allclose(P, torch.eye(12).expand(4, -1, -1), atol=1e-3)
-    P2, perm = softsort(s, 1e-4)
+    P2, perm = softsort(s, tau)
     assert torch.allclose(P2, torch.nn.functional.one_hot(perm, 12).float(), atol=1e-3)
 
 
@@ -85,3 +88,20 @@ def test_milp_dominates_greedy():
     # final-stage value of MILP >= greedy at the final stage? only the sum is optimal; check single stage
     v1, X1, _ = milp_multistage(inst.A, inst.w, inst.cost, [budget], inst.mod_site, inst.cap, 1.0)
     assert v1 + 1e-6 >= coverage_np(g, inst.A, inst.w)
+
+
+def test_stats():
+    from metrics.stats import boot_ci, paired_compare, holm
+    m, lo, hi, n = boot_ci([1.0, 2.0, 3.0, 4.0])
+    assert n == 4 and lo <= m <= hi and m == 2.5
+    assert boot_ci([])[3] == 0 and boot_ci([5.0])[1] == 5.0
+    a = {s: 1.0 + 0.1 * s for s in range(10)}
+    b = {s: 0.0 + 0.1 * s for s in range(10)}
+    r = paired_compare(a, b)
+    assert r["n"] == 10 and abs(r["diff"] - 1.0) < 1e-12 and r["p"] < 0.01
+    r = paired_compare({0: 1.0, 1: 2.0}, {1: 2.0, 2: 0.0})       # only unit 1 shared, zero diff
+    assert r["n"] == 1 and r["p"] == 1.0
+    assert holm([0.01, 0.04, float("nan"), 0.03]) [0] == 0.03
+    adj = holm([0.01, 0.04, 0.03])
+    assert adj == sorted(adj, key=lambda x: x) or all(x <= 1 for x in adj)
+    assert abs(adj[1] - 0.06) < 1e-12 and abs(adj[2] - 0.06) < 1e-12

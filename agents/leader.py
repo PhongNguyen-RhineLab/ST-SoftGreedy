@@ -74,9 +74,14 @@ class LeaderConfig:
     explore_sigma: float = 0.3
     explore_decay: float = 0.99
     alpha_cvar: float = 0.9
-    beta_grid: float = 0.8           # multiples of the calibration reference
-    beta_delay: float = 0.8
-    beta_cvar: float = 1.0
+    # constraint levels as multiples of the calibration plan (coverage greedy):
+    #   expected discounted grid excess  <= 0.8 x reference       (20% reduction, binds for the reference)
+    #   expected discounted mean lateness <= 1.5 x reference
+    #   CVaR_0.9 of episode grid excess   <= 1.2 x reference MEAN episode grid excess
+    # Fixed with experiments/exp3_bilevel.py --probe before training any learner; see README.
+    beta_grid: float = 0.8
+    beta_delay: float = 1.5
+    beta_cvar: float = 1.2
     lr_dual: float = 0.05
     use_cvar: bool = True
     penalty_kappa: float = 5.0
@@ -131,8 +136,8 @@ class LeaderAgent:
             ret = {h: 0.0 for h in HEADS}
             for t in reversed(range(T)):
                 st = ep[t]
-                inc = {"r": st["r"], "grid": st["c"]["grid"] / self.ref["grid"],
-                       "delay": st["c"]["delay"] / self.ref["delay"], "tail": 0.0,
+                inc = {"r": st["r"], "grid": st["c"]["grid"] / self.ref["grid_disc"],
+                       "delay": st["c"]["delay"] / self.ref["delay_disc"], "tail": 0.0,
                        "viol": st["c"]["viol"]}
                 for h in HEADS:
                     ret[h] = inc[h] + g * ret[h]
@@ -178,7 +183,7 @@ class LeaderAgent:
         g = cfg.gamma
         J = {h: np.mean([sum(g ** t * st["c"][h] for t, st in enumerate(ep)) for ep in episodes])
              for h in ("grid", "delay", "viol")}
-        Jg, Jd = J["grid"] / self.ref["grid"], J["delay"] / self.ref["delay"]
+        Jg, Jd = J["grid"] / self.ref["grid_disc"], J["delay"] / self.ref["delay_disc"]
         cvar = self.eta + np.mean(np.maximum(0, C_ep - self.eta)) / (1 - cfg.alpha_cvar)
         self.mu["grid"] = max(0.0, self.mu["grid"] + cfg.lr_dual * (Jg - cfg.beta_grid))
         self.mu["delay"] = max(0.0, self.mu["delay"] + cfg.lr_dual * (Jd - cfg.beta_delay))
@@ -208,46 +213,182 @@ class LeaderAgent:
     # ------------------------------------------------------------------
     def evaluate(self, n=None):
         """Deterministic policy over every demand quantile (common random numbers)."""
-        cfg, env = self.cfg, self.env
-        g = cfg.gamma
-        res = []
-        for k in range(len(env.scales)):
-            s = env.reset(); env.k = k
-            done = False; t = 0
-            acc = {"ret": 0.0, "grid": 0.0, "delay": 0.0, "viol": 0.0, "infeas": 0, "cov_disc": 0.0}
-            while not done:
-                x = self.act(s, explore=False)
-                s, r, c, done, info = env.step(x)
-                acc["ret"] += g ** t * r; acc["grid"] += c["grid"]; acc["delay"] += c["delay"]
-                acc["viol"] += c["viol"]; acc["infeas"] += c["infeasible"]
-                acc["cov_disc"] += g ** t * info["coverage"]
-                t += 1
-            acc["served_frac"] = info["served_frac"]; acc["cov_final"] = info["coverage"]
-            acc["built"] = info["built"].tolist()
-            res.append(acc)
-        grid = np.array([r["grid"] for r in res])
-        q = np.quantile(grid, cfg.alpha_cvar)
-        out = {k: float(np.mean([r[k] for r in res])) for k in
-               ("ret", "grid", "delay", "viol", "infeas", "cov_disc", "cov_final", "served_frac")}
-        out["infeas_rate"] = out.pop("infeas") / env.inst.T
-        out["cvar_grid"] = float(q + np.mean(np.maximum(0, grid - q)) / (1 - cfg.alpha_cvar))
-        out["built_example"] = res[0]["built"]
-        return out
+        return evaluate_policy(self.env, lambda st, env: self.act(st, explore=False),
+                               self.cfg.gamma, self.cfg.alpha_cvar, ref=self.ref, cfg=self.cfg)
+
+
+# ----------------------------------------------------------------------
+# evaluation shared by learned leaders and fixed reference plans
+# ----------------------------------------------------------------------
+def evaluate_policy(env: LeaderEnv, act_fn, gamma=0.95, alpha_cvar=0.9, ref=None, cfg=None):
+    """act_fn(state, env) -> binary module vector for the current stage.
+    Runs one episode per demand quantile k; identical protocol for every row
+    of the main table, so references and learned layers are comparable.
+
+    With ref and cfg, also reports the CMDP constraints exactly as the dual
+    ascent in LeaderAgent.update defines them:
+      g_grid  = E[sum_t gamma^t C_grid_t]  / ref_grid   vs beta_grid
+      g_delay = E[sum_t gamma^t C_delay_t] / ref_delay  vs beta_delay
+      g_cvar  = CVaR_alpha[sum_t C_grid_t] / ref_grid   vs beta_cvar (if use_cvar)
+    ref_grid_disc / ref_delay_disc are the DISCOUNTED expected costs of the
+    calibration plan and ref_grid its undiscounted episode total, so the
+    calibration plan itself has g/beta = 1/beta on the two expectation constraints.
+    Expectation = mean over the K demand quantiles, which is the distribution
+    the training episodes sample from."""
+    res = []
+    for k in range(len(env.scales)):
+        s = env.reset(); env.k = k
+        done = False; t = 0
+        acc = {"ret": 0.0, "grid": 0.0, "delay": 0.0, "viol": 0.0, "infeas": 0, "cov_disc": 0.0,
+               "grid_disc": 0.0, "delay_disc": 0.0}
+        while not done:
+            x = act_fn(s, env)
+            s, r, c, done, info = env.step(x)
+            acc["ret"] += gamma ** t * r; acc["grid"] += c["grid"]; acc["delay"] += c["delay"]
+            acc["grid_disc"] += gamma ** t * c["grid"]; acc["delay_disc"] += gamma ** t * c["delay"]
+            acc["viol"] += c["viol"]; acc["infeas"] += c["infeasible"]
+            acc["cov_disc"] += gamma ** t * info["coverage"]
+            t += 1
+        acc["served_frac"] = info["served_frac"]; acc["cov_final"] = info["coverage"]
+        acc["built"] = info["built"].tolist()
+        res.append(acc)
+    grid = np.array([r["grid"] for r in res])
+    q = np.quantile(grid, alpha_cvar)
+    out = {k: float(np.mean([r[k] for r in res])) for k in
+           ("ret", "grid", "delay", "viol", "infeas", "cov_disc", "cov_final", "served_frac",
+            "grid_disc", "delay_disc")}
+    out["infeas_rate"] = out.pop("infeas") / env.inst.T
+    out["cvar_grid"] = float(q + np.mean(np.maximum(0, grid - q)) / (1 - alpha_cvar))
+    out["built_example"] = res[0]["built"]
+    if ref is not None and cfg is not None:
+        out.update(constraint_report(out, ref, cfg))
+    return out
+
+
+def constraint_report(ev, ref, cfg, tol=1e-6):
+    """Ratios g/beta (<= 1 means satisfied) and the joint CMDP-feasibility flag."""
+    r = {"g_grid": ev["grid_disc"] / ref["grid_disc"] / cfg.beta_grid,
+         "g_delay": ev["delay_disc"] / ref["delay_disc"] / cfg.beta_delay,
+         "g_cvar": ev["cvar_grid"] / ref["grid"] / cfg.beta_cvar}
+    active = ["g_grid", "g_delay"] + (["g_cvar"] if cfg.use_cvar else [])
+    r["cmdp_ok"] = float(all(r[k] <= 1 + tol for k in active) and ev["infeas_rate"] == 0)
+    r["cmdp_max_ratio"] = max(r[k] for k in active)
+    return r
+
+
+def reference_policies():
+    """Fixed, non-learned plans evaluated with evaluate_policy.
+
+    greedy_rerank : per stage, re-ranking coverage greedy (best of gain and
+                    density) on the residual budget. Optimises coverage only,
+                    blind to grid / delay / the follower game. Same plan that
+                    calibrate() uses to set the cost references, so its
+                    normalised grid and delay costs are 1 by construction.
+    static_key    : Algorithm 1 with the modular coverage key and no learning,
+                    i.e. what STSG deploys if the scorer outputs that key.
+                    Measures what the leader learned beyond the hand-made key.
+    """
+    from stsg.coverage import rerank_greedy, static_key_greedy
+
+    def greedy_rerank(state, env):
+        inst = env.inst
+        budget, cap, avail = inst.residual(env.built, env.t)
+        return rerank_greedy(inst.A, inst.w, inst.cost, budget, inst.mod_site, cap, avail,
+                             base=env.built, rule="best")
+
+    def static_key(state, env):
+        inst = env.inst
+        budget, cap, avail = inst.residual(env.built, env.t)
+        key = (inst.w[:, None] * inst.A).sum(0)
+        return static_key_greedy(key, inst.cost, budget, inst.mod_site, cap, avail)
+
+    return {"ref_greedy_rerank": greedy_rerank, "ref_static_key": static_key}
+
+
+def budget_scaled_greedy(phi):
+    """Re-ranking coverage greedy restricted to a fraction phi of the cumulative
+    budget at every stage. phi < 1 builds less, hence lower grid / delay cost."""
+    from stsg.coverage import rerank_greedy
+
+    def act(state, env):
+        inst = env.inst
+        budget, cap, avail = inst.residual(env.built, env.t)
+        cum = float(inst.stage_budget[: env.t + 1].sum())
+        spent = cum - budget
+        b_phi = max(0.0, phi * cum - spent)
+        return rerank_greedy(inst.A, inst.w, inst.cost, b_phi, inst.mod_site, cap, avail,
+                             base=env.built, rule="best")
+    return act
+
+
+def budget_scaled_greedy_bess(phi):
+    """Domain heuristic: budget-scaled coverage greedy, then the remaining stage
+    budget buys BESS (grid-peak shaving) at the sites with the most MCS blocks."""
+    from stsg.coverage import rerank_greedy
+
+    def act(state, env):
+        inst = env.inst
+        budget, cap, avail = inst.residual(env.built, env.t)
+        cum = float(inst.stage_budget[: env.t + 1].sum())
+        new = rerank_greedy(inst.A, inst.w, inst.cost, max(0.0, phi * cum - (cum - budget)),
+                            inst.mod_site, cap, avail, base=env.built, rule="best")
+        tot = np.clip(env.built + new, 0, 1)
+        b = budget - float((inst.cost * new).sum())
+        n = cap - np.bincount(inst.mod_site, weights=new, minlength=inst.m)
+        cnt = inst.counts(tot)
+        mcs = cnt[:, 0] + cnt[:, 1]
+        for j in np.argsort(-mcs, kind="stable"):
+            if mcs[j] == 0:
+                break
+            i = int(np.where((inst.mod_site == j) & (inst.mod_type == 3))[0][0])
+            if tot[i] == 0 and inst.cost[i] <= b + 1e-9 and n[j] >= 1:
+                new[i] = 1.0; b -= inst.cost[i]; n[j] -= 1
+        return new
+    return act
+
+
+def constrained_greedy_reference(env, ref, cfg, phis=None):
+    """ref_greedy_constrained: sweep phi over two heuristic families (coverage
+    greedy, coverage greedy + BESS), keep the best-return plan that satisfies
+    the CMDP constraints. The sweep is scored on the evaluation quantiles
+    themselves, i.e. tuned on the test distribution: this favours the reference,
+    which is the conservative direction for any claim that a learned leader beats it.
+    Returns (best_eval_with_phi, sweep list). If no phi is CMDP-feasible the
+    least-violating plan is returned with cmdp_ok = 0."""
+    phis = phis if phis is not None else [round(0.1 * i, 1) for i in range(0, 11)]
+    sweep = []
+    for fam, maker in (("greedy", budget_scaled_greedy), ("greedy+BESS", budget_scaled_greedy_bess)):
+        for phi in phis:
+            ev = evaluate_policy(env, maker(phi), cfg.gamma, cfg.alpha_cvar, ref=ref, cfg=cfg)
+            ev["phi"], ev["family"] = phi, fam
+            sweep.append(ev)
+    ok = [e for e in sweep if e["cmdp_ok"]]
+    best = max(ok, key=lambda e: e["ret"]) if ok else min(sweep, key=lambda e: e["cmdp_max_ratio"])
+    keys = ("family", "phi", "ret", "g_grid", "g_delay", "g_cvar", "cmdp_ok")
+    return best, [{k: e[k] for k in keys} for e in sweep]
 
 
 def calibrate(env: LeaderEnv, gamma=0.95):
-    """Reference costs from the re-ranking coverage greedy run stage by stage."""
+    """Reference costs of the re-ranking coverage greedy run stage by stage.
+
+    grid, delay           : mean undiscounted episode totals (CVaR is on the undiscounted total)
+    grid_disc, delay_disc : mean discounted totals, same discounting as the constraint
+    The floors only keep the ratios finite if the reference plan is (nearly) cost-free."""
     from stsg.coverage import rerank_greedy
     inst = env.inst
-    grids, delays = [], []
+    acc = {"grid": [], "delay": [], "grid_disc": [], "delay_disc": []}
     for k in range(len(env.scales)):
-        env.reset(); env.k = k; done = False; G = D = 0.0
+        env.reset(); env.k = k; done = False; t = 0
+        tot = dict.fromkeys(acc, 0.0)
         while not done:
             budget, cap, avail = inst.residual(env.built, env.t)
             new = rerank_greedy(inst.A, inst.w, inst.cost, budget, inst.mod_site, cap, avail,
                                 base=env.built, rule="best")
             _, _, c, done, _ = env.step(new)
-            G += c["grid"]; D += c["delay"]
-        grids.append(G); delays.append(D)
-    # floors keep the normalisation finite when the reference plan is (nearly) cost-free
-    return {"grid": max(float(np.mean(grids)), 1.0), "delay": max(float(np.mean(delays)), 1.0)}
+            tot["grid"] += c["grid"]; tot["delay"] += c["delay"]
+            tot["grid_disc"] += gamma ** t * c["grid"]; tot["delay_disc"] += gamma ** t * c["delay"]
+            t += 1
+        for key in acc:
+            acc[key].append(tot[key])
+    floor = {"grid": 1.0, "grid_disc": 1.0, "delay": 1e-3, "delay_disc": 1e-3}
+    return {key: max(float(np.mean(v)), floor[key]) for key, v in acc.items()}

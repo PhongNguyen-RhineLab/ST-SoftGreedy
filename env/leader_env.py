@@ -5,7 +5,12 @@ Action: binary module vector from an action layer (may be infeasible for
 baselines; the environment executes it and records the violation, and any
 overspend is carried into the next stage's residual budget).
 Reward: R_macro_t = served_frac_t + cov_weight * f(X_t) / sum(w).
-Costs:  grid (MW^2 h), delay (late truck-hours), viol (constraint excess).
+Costs:  grid (MW^2 h), delay, viol (constraint excess).
+        delay_metric "per_served" (default): late truck-hours per served truck, i.e.
+          mean lateness. "total": late truck-hours, the original definition. The
+          total is proportional to served volume, so it rewards serving nobody
+          (build nothing => delay 0) and makes the delay and grid constraints pull
+          in opposite directions; see README, section "CMDP constraints".
 
 Follower outcomes use the frozen amortised policy with deterministic actions.
 Demand stochasticity comes from K fixed lognormal quantiles (common random
@@ -28,8 +33,10 @@ GLOB_DIM = 4
 
 class LeaderEnv:
     def __init__(self, inst: CorridorInstance, follower, cov_weight=1.0, K_scales=8,
-                 seed=0, cache=True):
+                 seed=0, cache=True, delay_metric="per_served"):
         self.inst, self.follower, self.cov_weight = inst, follower, cov_weight
+        assert delay_metric in ("per_served", "total")
+        self.delay_metric = delay_metric
         self.rng = np.random.default_rng(seed)
         q = (np.arange(K_scales) + 0.5) / K_scales
         from scipy.stats import norm
@@ -86,7 +93,8 @@ class LeaderEnv:
         met = self.follower_outcome(self.built, self.k)
         cov = coverage_np(self.built, inst.A, inst.w)
         reward = met["served_frac"] + self.cov_weight * cov / self.wsum
-        costs = {"grid": met["grid"], "delay": met["delay"],
+        delay = met["delay"] / max(met["served"], 1e-6) if self.delay_metric == "per_served" else met["delay"]
+        costs = {"grid": met["grid"], "delay": delay,
                  "viol": float(viol["total"]), "infeasible": float(viol["infeasible"])}
         info = {"coverage": cov, "served_frac": met["served_frac"], "built": self.built.copy()}
         self.t += 1
