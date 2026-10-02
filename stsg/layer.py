@@ -243,13 +243,21 @@ def consistency_diagnostics(y, cb: ConstraintBatch, tau1, tau2, key="score",
     big = torch.full_like(tr["budget_slack"], float("inf"))
     d_b = torch.where(av, tr["budget_slack"].abs(), big).amin(-1)
     d_p = torch.where(av, (tr["part_slack"] - gate_offset).abs(), big).amin(-1)
-    delta = torch.minimum(d_b, d_p)
+    # Definition (delta-margin), corrected: delta in (0, 1/2]; the matroid gate centred at
+    # n = 1/2 has margin >= 1/2 automatically, so only the budget margin can be smaller.
+    delta = torch.minimum(torch.minimum(d_b, d_p), torch.full_like(d_b, 0.5))
     lam = cb.c.amax(-1).clamp_min(1.0)
     rho = torch.exp(-delta / (2 * tau2))
-    precond = (N * lam * rho / tau2) <= math.log(2)
+    # Lemma (gate consistency), corrected hypotheses:
+    #   (i)  2 N lam rho / tau2 <= ln 2   (factor 2: two gates per step)
+    #   (ii) tau2 <= delta / (4 ln 2)     (needed for the induction to close)
+    cond_i = (2 * N * lam * rho / tau2) <= math.log(2)
+    cond_ii = tau2 <= delta / (4 * math.log(2))
+    precond = cond_i & cond_ii
     err = (x_tilde - x_bar).abs().sum(-1)
-    bound = 4 * N * rho + 2 * N ** 2 * torch.exp(-gamma / tau1)
+    bound = 4 * N * rho + 2 * N * (N - 1) * torch.exp(-gamma / tau1)
     return {"err_l1": err, "bound": bound, "precond_ok": precond,
+            "cond_i": cond_i, "cond_ii": cond_ii,
             "rank_err": rank_err, "rank_bound": 2 * (N - 1) * torch.exp(-gamma / tau1),
             "col_dev": col_dev, "gamma": gamma, "delta": delta,
             "delta_part_paper": torch.where(av, (tr["part_slack"] - 1).abs(), big).amin(-1)}

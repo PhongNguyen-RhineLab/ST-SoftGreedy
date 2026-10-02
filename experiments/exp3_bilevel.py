@@ -66,6 +66,9 @@ def main():
     ap.add_argument("--delay_metric", default="per_served", choices=["per_served", "total"])
     ap.add_argument("--explore_sigma", type=float, default=LeaderConfig.explore_sigma)
     ap.add_argument("--explore_decay", type=float, default=LeaderConfig.explore_decay)
+    ap.add_argument("--lr_dual", type=float, default=LeaderConfig.lr_dual)
+    ap.add_argument("--layer_kw", default="{}",
+                    help='JSON kwargs for the action layer, e.g. \'{"M": 4}\' for the perturbed optimiser')
     ap.add_argument("--prior_scale", type=float, default=LeaderConfig.prior_scale,
                     help="warm start: actor = residual on the static coverage key (0 = off)")
     ap.add_argument("--probe", action="store_true",
@@ -86,6 +89,11 @@ def main():
 
     betas = dict(beta_grid=a.beta_grid, beta_delay=a.beta_delay, beta_cvar=a.beta_cvar)
     train_kw = dict(explore_sigma=a.explore_sigma, explore_decay=a.explore_decay, prior_scale=a.prior_scale)
+    if a.lr_dual != LeaderConfig.lr_dual:          # only recorded when changed, so older result files still merge
+        train_kw["lr_dual"] = a.lr_dual
+    layer_kw = json.loads(a.layer_kw)
+    if layer_kw:
+        train_kw["layer_kw"] = layer_kw
     env0 = LeaderEnv(inst, follower, seed=0, delay_metric=a.delay_metric)
     ref = calibrate(env0)
     if old is not None and not a.probe:
@@ -188,8 +196,10 @@ def run_one(arg):
     torch.set_num_threads(1)
     follower = FollowerPolicy(); follower.load_state_dict(torch.load(fpath))
     env = LeaderEnv(inst, follower, seed=sd, delay_metric=delay_metric)
+    train_kw = dict(train_kw)
+    layer_kw = train_kw.pop("layer_kw", {})
     cfg = LeaderConfig(layer=meth, iters=iters, episodes_per_iter=eps, seed=sd, use_cvar=use_cvar,
-                       **betas, **train_kw)
+                       layer_kw=layer_kw, **betas, **train_kw)
     agent = LeaderAgent(env, cfg, ref)
     t1 = time.time()
     log = agent.train(verbose=verbose, log_every=max(1, iters // 5))
